@@ -1,6 +1,8 @@
 #include <array>
 #include <cstring>
 #include <stdexcept>
+#include <algorithm>
+#include <chrono>
 
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -9,6 +11,8 @@
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2_ros/transform_broadcaster.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <std_msgs/msg/float32.hpp>
+#include <rclcpp/qos.hpp>
 
 #include <HD/hd.h>
 #include <HDU/hduError.h>
@@ -16,9 +20,21 @@
 class TouchNode : public rclcpp::Node {
 public:
     TouchNode() : Node("touch_node") {
-        publisher_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/touch/pose", 10);
-        button_publisher_ = this->create_publisher<std_msgs::msg::Int8>("/touch/buttons", 10);
-        tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
+
+
+        auto sensor_qos = rclcpp::QoS(rclcpp::KeepLast(1));
+        sensor_qos.best_effort();
+        sensor_qos.durability_volatile();
+
+        publisher_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/touch/pose", sensor_qos);
+        button_publisher_ = this->create_publisher<std_msgs::msg::Int8>("/touch/buttons", sensor_qos);
+        wrist_twist_publisher_ = this->create_publisher<std_msgs::msg::Float32>("/touch/wrist_twist", sensor_qos);
+        
+        if (publish_tf_) {
+            tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
+        }
+        
+
 
         hHD_ = hdInitDevice(HD_DEFAULT_DEVICE);
         if (HD_DEVICE_ERROR(error_ = hdGetError())) {
@@ -76,6 +92,9 @@ private:
         HDErrorInfo error{};
         bool valid = false;
     };
+
+    bool orientation_initialized_ = false;
+    tf2::Matrix3x3 R_zero_;
 
     struct CopyUserData {
         DeviceData *dst;
@@ -168,16 +187,21 @@ private:
             0, 1, 0
         );
 
-        // 2. Transformer la rotation brute du Touch dans le monde ROS
-        tf2::Matrix3x3 R_base = R_mapping * R_raw;
+        tf2::Matrix3x3 R_base = R_mapping * R_raw.transpose() * R_mapping.transpose();
 
-        // 3. Correction LOCALE du stylet (pour aligner l'axe rouge 'X' de RViz avec la pointe physique du stylet)
-        tf2::Matrix3x3 R_fix;
-        // La c'est "le tronc qui la où devrait être le stylo", donc on le retourne de 180 degres (PI) sur un autre axe (Z = yaw) !
-        // setRPY(Roll = axe X, Pitch = axe Y, Yaw = axe Z)
-        R_fix.setRPY(0.0, 1.57079632679, 3.14159265359); 
+    
 
-        tf2::Matrix3x3 R_corrected = R_base * R_fix;
+        tf2::Matrix3x3 R_relative =  R_base;
+
+        double roll, pitch, yaw;
+        R_relative.getRPY(roll, pitch, yaw);
+
+        // Inverser seulement l’axe qui tourne dans le mauvais sens
+        yaw = -yaw;    // si Z est faux
+      
+
+        tf2::Matrix3x3 R_corrected;
+        R_corrected.setRPY(roll, pitch, yaw);
 
         tf2::Quaternion q;
         R_corrected.getRotation(q);
@@ -189,8 +213,8 @@ private:
 
 
         // POSITION : on garde exactement ton mapping actuel
-        msg.pose.position.x = current_data.position[2] / 100.0;
-        msg.pose.position.y = current_data.position[0] / 100.0;
+        msg.pose.position.x = current_data.position[2] / -100.0;
+        msg.pose.position.y = current_data.position[0] / -100.0;
         msg.pose.position.z = current_data.position[1] / 100.0;
 
         // ORIENTATION
@@ -202,16 +226,16 @@ private:
         publisher_->publish(msg);
 
         // Publication TF pour le voir en live sous RViz
-        geometry_msgs::msg::TransformStamped t;
-        t.header.stamp = msg.header.stamp;
-        t.header.frame_id = "world";  // Frame global sous rviz
-        t.child_frame_id = "touch_cursor";
-        t.transform.translation.x = msg.pose.position.x;
-        t.transform.translation.y = msg.pose.position.y;
-        t.transform.translation.z = msg.pose.position.z;
-        t.transform.rotation = msg.pose.orientation;
-        
-        if (tf_broadcaster_) {
+        if (publish_tf_ && tf_broadcaster_) {
+            geometry_msgs::msg::TransformStamped t;
+            t.header.stamp = msg.header.stamp;
+            t.header.frame_id = "world";
+            t.child_frame_id = "touch_cursor";
+            t.transform.translation.x = msg.pose.position.x;
+            t.transform.translation.y = msg.pose.position.y;
+            t.transform.translation.z = msg.pose.position.z;
+            t.transform.rotation = msg.pose.orientation;
+
             tf_broadcaster_->sendTransform(t);
         }
 
@@ -231,31 +255,42 @@ private:
 
         button_publisher_->publish(button_msg);
 
+        std_msgs::msg::Float32 twist_msg;
+        twist_msg.data = static_cast<float>(current_data.gimbal_angles[2]);
+        wrist_twist_publisher_->publish(twist_msg);
+
         RCLCPP_INFO_THROTTLE(
             this->get_logger(),
             *this->get_clock(),
             1000,
-            "pos=[%.3f %.3f %.3f] gimbal=[%.3f %.3f %.3f]",
+            "pos=[%.3f %.3f %.3f] gimbal=[%.3f %.3f %.3f] twist=%.3f",
             msg.pose.position.x,
             msg.pose.position.y,
             msg.pose.position.z,
             current_data.gimbal_angles[0],
             current_data.gimbal_angles[1],
+            current_data.gimbal_angles[2],
             current_data.gimbal_angles[2]
-        
         );
     }
 
     HHD hHD_ = HD_INVALID_HANDLE;
     HDSchedulerHandle callback_handle_ = HD_INVALID_HANDLE;
     bool scheduler_started_ = false;
+    bool publish_tf_ = false;
     HDErrorInfo error_{};
 
     DeviceData servo_data_{};
+    double gripper_value_ = -0.2;
+    double gripper_speed_ = 3.0;   // à régler
+    rclcpp::Time last_gripper_update_time_;
+
+    rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr gripper_cmd_publisher_;
 
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr publisher_;
     rclcpp::Publisher<std_msgs::msg::Int8>::SharedPtr button_publisher_;
+    rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr wrist_twist_publisher_;
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 };
 

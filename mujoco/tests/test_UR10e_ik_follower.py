@@ -62,17 +62,16 @@ class TouchToTargetPoseNode(Node):
     def __init__(self) -> None:
         super().__init__("touch_to_target_pose")
 
-
-        self.position_scale = 0.3
+        self.position_scale = 0.4
 
         # Position initiale exacte du robot (calculée à partir de home_q)
-        self.initial_robot_pos = np.array([0.618, 0.174, 0.624], dtype=float)
-        
+        self.initial_robot_pos = np.array([0.997007, 0.174247, 0.694586], dtype=float)
+
         # Orientation initiale exacte du robot pour éviter que ça tire sur le poignet
         self.initial_robot_rot = np.array([
-            [ -0.0006, -0.7174, -0.6967],
-            [ -1.0000, -0.0000,  0.0008],
-            [ -0.0006,  0.6967, -0.7174]
+            [-0.000795, 0.049979, 0.998750],
+            [1.000000, 0.000000, 0.000796],
+            [0.000040, 0.998750, -0.049979],
         ], dtype=float)
 
         self.target_pos: Optional[np.ndarray] = None
@@ -82,7 +81,10 @@ class TouchToTargetPoseNode(Node):
         self.prev_touch_rot: Optional[np.ndarray] = None
         self.touch_initialized = False
 
+        self.current_buttons = 0
+        self.gripper_speed = 1.2
         self.gripper_value = -0.2
+        self.last_gripper_time = self.get_clock().now()
 
         self.target_pub = self.create_publisher(PoseStamped, "/teleop/target_pose", 10)
         self.gripper_pub = self.create_publisher(Float32, "/teleop/gripper_cmd", 10)
@@ -90,15 +92,31 @@ class TouchToTargetPoseNode(Node):
         self.pose_sub = self.create_subscription(PoseStamped, "/touch/pose", self.pose_cb, 10)
         self.buttons_sub = self.create_subscription(Int8, "/touch/buttons", self.buttons_cb, 10)
 
+        self.gripper_timer = self.create_timer(
+            0.005,
+            self.update_gripper
+        )
+
         self.get_logger().info("touch_to_target_pose started")
 
     def buttons_cb(self, msg: Int8) -> None:
-        buttons = int(msg.data)
+        self.current_buttons = int(msg.data)
 
-        if buttons == 1:
-            self.gripper_value -= 0.01
-        elif buttons == -1:
-            self.gripper_value += 0.01
+    def update_gripper(self) -> None:
+        now = self.get_clock().now()
+        dt = (now - self.last_gripper_time).nanoseconds * 1e-9
+        self.last_gripper_time = now
+
+        if self.current_buttons == 1:
+            self.gripper_value -= self.gripper_speed * dt   # ouvrir
+        elif self.current_buttons == -1:
+            self.gripper_value += self.gripper_speed * dt   # fermer
+
+        self.gripper_value = max(-0.2, min(1.2, self.gripper_value))
+
+        g = Float32()
+        g.data = float(self.gripper_value)
+        self.gripper_pub.publish(g)
 
     def pose_cb(self, msg: PoseStamped) -> None:
         touch_pos = np.array([
@@ -167,9 +185,7 @@ class TouchToTargetPoseNode(Node):
 
         self.target_pub.publish(msg)
 
-        g = Float32()
-        g.data = float(self.gripper_value)
-        self.gripper_pub.publish(g)
+       
 
 
 def main() -> None:

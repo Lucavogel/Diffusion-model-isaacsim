@@ -9,8 +9,10 @@ MODEL_PATH = Path("/home/luca/Stage_Lirmm/Diffusion-model-isaacsim/mujoco/models
 model = mujoco.MjModel.from_xml_path(str(MODEL_PATH))
 data = mujoco.MjData(model)
 
-# robot
-data.qpos[:6] = np.array([0.0, -1.2, 1.6, -1.2, -1.57, 0.0], dtype=float)
+# robot: définir la pose "home" et l'appliquer dès le départ
+HOME_QPOS = np.array([0.0, -1.3, 1.8, -0.22, 1.57, 0.0], dtype=float)
+data.qpos[:6] = HOME_QPOS.copy()
+data.qvel[:6] = 0.0
 
 # Trouver l'adresse dynamique du cube libre au lieu de coder "12" en dur
 cube_joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "object_cube_freejoint")
@@ -26,9 +28,15 @@ mujoco.mj_forward(model, data)
 try:
     with mujoco.viewer.launch_passive(model, data) as viewer:
         while viewer.is_running():
-            mujoco.mj_step(model, data)
-            viewer.sync()
-            time.sleep(model.opt.timestep)
+                mujoco.mj_step(model, data)
+
+                # forcer la pose 'home' et annuler les vitesses pour la maintenir
+                data.qpos[:6] = HOME_QPOS.copy()
+                data.qvel[:6] = 0.0
+                mujoco.mj_forward(model, data)
+
+                viewer.sync()
+                time.sleep(model.opt.timestep)
 except KeyboardInterrupt:
     print("Arrêt demandé.")
 finally:

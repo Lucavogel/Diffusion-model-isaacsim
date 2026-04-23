@@ -76,6 +76,8 @@ private:
         HDErrorInfo error{};
         bool valid = false;
     };
+    bool orientation_initialized_ = false;
+    tf2::Matrix3x3 R_zero_;
 
     struct CopyUserData {
         DeviceData *dst;
@@ -164,17 +166,17 @@ private:
         // Position du code : X_ros = Z_touch, Y_ros = X_touch, Z_ros = Y_touch
         tf2::Matrix3x3 R_mapping(
             0, 0, 1,
-            1, 0, 0,
+            -1, 0, 0,
             0, 1, 0
         );
 
-        // 2. Transformer la rotation brute du Touch dans le monde ROS
+      
+
+
         tf2::Matrix3x3 R_base = R_mapping * R_raw;
 
-        // 3. Correction LOCALE du stylet (pour aligner l'axe rouge 'X' de RViz avec la pointe physique du stylet)
         tf2::Matrix3x3 R_fix;
-   
-        R_fix.setRPY(0.0, 1.57079632679, 3.14159265359); 
+        R_fix.setRPY(0.0, 0, M_PI/2);   // ou petit offset si besoin
 
         tf2::Matrix3x3 R_corrected = R_base * R_fix;
 
@@ -188,8 +190,8 @@ private:
 
 
         // POSITION : on garde exactement ton mapping actuel
-        msg.pose.position.x = current_data.position[2] / 100.0;
-        msg.pose.position.y = current_data.position[0] / 100.0;
+        msg.pose.position.x = current_data.position[2] / -100.0;
+        msg.pose.position.y = current_data.position[0] / -100.0;
         msg.pose.position.z = current_data.position[1] / 100.0;
 
         // ORIENTATION
